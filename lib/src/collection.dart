@@ -8,81 +8,70 @@ import 'point.dart';
 import 'util.dart';
 
 class GeoFireCollectionRef {
-  Query _collectionReference;
-  Stream<QuerySnapshot>? _stream;
+  final Query<Map<String, dynamic>> _collectionReference;
+  late final Stream<QuerySnapshot<Map<String, dynamic>>> _stream;
 
   GeoFireCollectionRef(this._collectionReference) {
-    // : assert(_collectionReference != null)
     _stream = _createStream(_collectionReference)!.shareReplay(maxSize: 1);
   }
 
   /// return QuerySnapshot stream
-  Stream<QuerySnapshot>? snapshot() {
+  Stream<QuerySnapshot<Map<String, dynamic>>> snapshot() {
     return _stream;
   }
 
   /// return the Document mapped to the [id]
-  Stream<List<DocumentSnapshot>> data(String id) {
-    return _stream!.map((QuerySnapshot querySnapshot) {
-      querySnapshot.docs.where((DocumentSnapshot documentSnapshot) {
-        return documentSnapshot.id == id;
-      });
-      return querySnapshot.docs;
+  Stream<List<DocumentSnapshot<Map<String, dynamic>>>> data(String id) {
+    return _stream.map((querySnapshot) {
+      return querySnapshot.docs
+          .where((doc) => doc.id == id)
+          .toList();
     });
   }
 
   /// add a document to collection with [data]
-  Future<DocumentReference> add(Map<String, dynamic> data) {
+  Future<DocumentReference<Map<String, dynamic>>> add(Map<String, dynamic> data) {
     try {
-      CollectionReference colRef = _collectionReference as CollectionReference;
+      final colRef = _collectionReference as CollectionReference<Map<String, dynamic>>;
       return colRef.add(data);
     } catch (e) {
-      throw Exception(
-          'cannot call add on Query, use collection reference instead');
+      throw Exception('cannot call add on Query, use collection reference instead');
     }
   }
 
   /// delete document with [id] from the collection
-  Future<void> delete(id) {
+  Future<void> delete(String id) {
     try {
-      CollectionReference colRef = _collectionReference as CollectionReference;
+      final colRef = _collectionReference as CollectionReference<Map<String, dynamic>>;
       return colRef.doc(id).delete();
     } catch (e) {
-      throw Exception(
-          'cannot call delete on Query, use collection reference instead');
+      throw Exception('cannot call delete on Query, use collection reference instead');
     }
   }
 
   /// create or update a document with [id], [merge] defines whether the document should overwrite
-  Future<void> setDoc(String id, var data, {bool merge = false}) {
+  Future<void> setDoc(String id, Map<String, dynamic> data, {bool merge = false}) {
     try {
-      CollectionReference colRef = _collectionReference as CollectionReference;
+      final colRef = _collectionReference as CollectionReference<Map<String, dynamic>>;
       return colRef.doc(id).set(data, SetOptions(merge: merge));
     } catch (e) {
-      throw Exception(
-          'cannot call set on Query, use collection reference instead');
+      throw Exception('cannot call set on Query, use collection reference instead');
     }
   }
 
-  /// set a geo point with [latitude] and [longitude] using [field] as the object key to the document with [id]
-  Future<void> setPoint(
-      String id, String field, double latitude, double longitude) {
+  /// set a geo point with [latitude] and [longitude] using [field]
+  Future<void> setPoint(String id, String field, double latitude, double longitude) {
     try {
-      CollectionReference colRef = _collectionReference as CollectionReference;
-      var point = GeoFirePoint(latitude, longitude).data;
+      final colRef = _collectionReference as CollectionReference<Map<String, dynamic>>;
+      final point = GeoFirePoint(latitude, longitude).data;
       return colRef.doc(id).set({'$field': point}, SetOptions(merge: true));
     } catch (e) {
-      throw Exception(
-          'cannot call set on Query, use collection reference instead');
+      throw Exception('cannot call set on Query, use collection reference instead');
     }
   }
 
-  /// Create combined stream listeners for each geo hash around (including) central point.
-  /// It creates 9 listeners and the hood.
-  ///
-  /// Returns [StreamController.stream] instance from rxdart, which is combined stream,
-  /// for all 9 listeners.
-  Stream<List<DocumentSnapshot>> _buildQueryStream({
+  /// Build combined stream for geohash area
+  Stream<List<DocumentSnapshot<Map<String, dynamic>>>> _buildQueryStream({
     required GeoFirePoint center,
     required double radius,
     required String field,
@@ -94,32 +83,24 @@ class GeoFireCollectionRef {
       GeoFirePoint.neighborsOf(hash: centerHash)..add(centerHash),
     ).toList();
 
-    Iterable<Stream<List<DistanceDocSnapshot>>> queries = area.map((hash) {
+    final queries = area.map((hash) {
       final tempQuery = _queryPoint(hash, field);
-      return _createStream(tempQuery)!.map((QuerySnapshot querySnapshot) {
+      return _createStream(tempQuery)!.map((querySnapshot) {
         return querySnapshot.docs
             .map((element) => DistanceDocSnapshot(element, null))
             .toList();
       });
     });
 
-    Stream<List<DistanceDocSnapshot>> mergedObservable =
-        mergeObservable(queries);
+    final mergedObservable = mergeObservable(queries);
 
-    var filtered = mergedObservable.map((List<DistanceDocSnapshot> list) {
-      var mappedList = list.map((DistanceDocSnapshot distanceDocSnapshot) {
-        // split and fetch geoPoint from the nested Map
+    return mergedObservable.map((list) {
+      final mappedList = list.map((distanceDocSnapshot) {
         final fieldList = field.split('.');
-        Map<dynamic, dynamic> snapData =
-            distanceDocSnapshot.documentSnapshot.exists
-                ? distanceDocSnapshot.documentSnapshot.data() as Map
-                : Map();
+        final snapData = distanceDocSnapshot.documentSnapshot.data();
         var geoPointField = snapData[fieldList[0]];
-        //distanceDocSnapshot.documentSnapshot.data()![fieldList[0]];
-        if (fieldList.length > 1) {
-          for (int i = 1; i < fieldList.length; i++) {
-            geoPointField = geoPointField[fieldList[i]];
-          }
+        for (int i = 1; i < fieldList.length; i++) {
+          geoPointField = geoPointField[fieldList[i]];
         }
         final GeoPoint geoPoint = geoPointField['geopoint'];
         distanceDocSnapshot.distance =
@@ -129,94 +110,54 @@ class GeoFireCollectionRef {
 
       final filteredList = strictMode
           ? mappedList
-              .where((DistanceDocSnapshot doc) =>
-                      doc.distance! <=
-                      radius * 1.02 // buffer for edge distances;
-                  )
+              .where((doc) => doc.distance! <= radius * 1.02)
               .toList()
           : mappedList.toList();
-      filteredList.sort((a, b) {
-        final distA = a.distance!;
-        final distB = b.distance!;
-        final val = (distA * 1000).toInt() - (distB * 1000).toInt();
-        return val;
-      });
-      return filteredList.map((element) => element.documentSnapshot).toList();
+
+      filteredList.sort((a, b) => (a.distance! * 1000).toInt() - (b.distance! * 1000).toInt());
+
+      return filteredList.map((e) => e.documentSnapshot).toList();
     });
-    return filtered;
   }
 
-  /// Query firestore documents based on geographic [radius] from geoFirePoint [center]
-  /// [field] specifies the name of the key in the document
-  /// returns merged stream as broadcast stream.
-  ///
-  /// Returns original stream from the underlying rxdart implementation, which
-  /// could be safely cancelled without memory leaks. It's single stream subscription,
-  /// so only single listener could be created at a time.
-  ///
-  /// This works the best if you have central point of listening for locations,
-  /// not per widget.
-  Stream<List<DocumentSnapshot>> withinAsSingleStreamSubscription({
+  Stream<List<DocumentSnapshot<Map<String, dynamic>>>> withinAsSingleStreamSubscription({
     required GeoFirePoint center,
     required double radius,
     required String field,
     bool strictMode = false,
   }) {
-    return _buildQueryStream(
-      center: center,
-      radius: radius,
-      field: field,
-      strictMode: strictMode,
-    );
+    return _buildQueryStream(center: center, radius: radius, field: field, strictMode: strictMode);
   }
 
-  /// Query firestore documents based on geographic [radius] from geoFirePoint [center]
-  /// [field] specifies the name of the key in the document
-  /// returns merged stream as broadcast stream.
-  ///
-  /// !WARNING! This causes memory leaks because under the hood rxdart StreamController
-  /// never causes it's subscriptions to be cancelled. So, even you cancel stream
-  /// subscription created from this method, under the hood listeners are still working.
-  ///
-  /// More at: https://github.com/dart-lang/sdk/issues/26686#issuecomment-225346901
-  Stream<List<DocumentSnapshot>> within({
+  Stream<List<DocumentSnapshot<Map<String, dynamic>>>> within({
     required GeoFirePoint center,
     required double radius,
     required String field,
     bool strictMode = false,
   }) {
-    return _buildQueryStream(
-      center: center,
-      radius: radius,
-      field: field,
-      strictMode: strictMode,
-    ).asBroadcastStream();
+    return _buildQueryStream(center: center, radius: radius, field: field, strictMode: strictMode)
+        .asBroadcastStream();
   }
 
   Stream<List<DistanceDocSnapshot>> mergeObservable(
       Iterable<Stream<List<DistanceDocSnapshot>>> queries) {
-    Stream<List<DistanceDocSnapshot>> mergedObservable = Rx.combineLatest(
-        queries, (List<List<DistanceDocSnapshot>> originalList) {
-      final reducedList = <DistanceDocSnapshot>[];
-      originalList.forEach((t) {
-        reducedList.addAll(t);
-      });
-      return reducedList;
+    return Rx.combineLatest(queries, (List<List<DistanceDocSnapshot>> lists) {
+      return lists.expand((x) => x).toList();
     });
-    return mergedObservable;
   }
-
-  /// INTERNAL FUNCTIONS
 
   /// construct a query for the [geoHash] and [field]
-  Query _queryPoint(String geoHash, String field) {
+  Query<Map<String, dynamic>> _queryPoint(String geoHash, String field) {
     final end = '$geoHash~';
-    final temp = _collectionReference;
-    return temp.orderBy('$field.geohash').startAt([geoHash]).endAt([end]);
+    return _collectionReference
+        .orderBy('$field.geohash')
+        .startAt([geoHash])
+        .endAt([end]);
   }
 
-  /// create an observable for [ref], [ref] can be [Query] or [CollectionReference]
-  Stream<QuerySnapshot>? _createStream(var ref) {
+  Stream<QuerySnapshot<Map<String, dynamic>>>? _createStream(
+      Query<Map<String, dynamic>> ref) {
     return ref.snapshots();
   }
 }
+
